@@ -25,12 +25,24 @@ def slugify(text):
     return text[:80]
 
 
+def check_403(resp, context=""):
+    if resp.status_code == 403:
+        print(f"  [ERROR] {context} 返回 403 Forbidden")
+        print(f"  [ERROR] 你的 API Token 没有权限访问该页面。")
+        print(f"  [ERROR] 请确保在 FlowUs 页面右上角「分享」中，已将页面授权给你的 Bot/应用。")
+        print(f"  [ERROR] 响应内容: {resp.text[:300]}")
+        return True
+    return False
+
+
 def get_page(page_id):
     url = f"{BASE_URL}/v1/pages/{page_id}"
     resp = requests.get(url, headers=HEADERS)
     if resp.status_code == 200:
         return resp.json()
-    print(f"  [WARN] get_page({page_id}) failed: {resp.status_code} {resp.text[:200]}")
+    check_403(resp, f"get_page({page_id})")
+    if resp.status_code != 403:
+        print(f"  [WARN] get_page({page_id}) failed: {resp.status_code} {resp.text[:200]}")
     return None
 
 
@@ -39,7 +51,8 @@ def get_block(block_id):
     resp = requests.get(url, headers=HEADERS)
     if resp.status_code == 200:
         return resp.json()
-    print(f"  [WARN] get_block({block_id}) failed: {resp.status_code}")
+    if not check_403(resp, f"get_block({block_id})"):
+        print(f"  [WARN] get_block({block_id}) failed: {resp.status_code}")
     return None
 
 
@@ -50,11 +63,14 @@ def get_block_children(block_id, start_cursor=None):
     resp = requests.get(url, headers=HEADERS)
     if resp.status_code == 200:
         return resp.json()
-    print(f"  [WARN] get_block_children({block_id}) failed: {resp.status_code}")
+    if not check_403(resp, f"get_block_children({block_id})"):
+        print(f"  [WARN] get_block_children({block_id}) failed: {resp.status_code}")
     return {"results": [], "has_more": False}
 
 
-def fetch_all_children(block_id):
+def fetch_all_children(block_id, use_internal_api=False):
+    if use_internal_api:
+        return fetch_all_children_internal(block_id)
     all_results = []
     cursor = None
     while True:
@@ -64,6 +80,137 @@ def fetch_all_children(block_id):
             break
         cursor = data.get("next_cursor")
     return all_results
+
+
+def fetch_page_internal(page_id):
+    url = f"https://flowus.cn/api/docs/{page_id}"
+    resp = requests.get(url, headers={"Content-Type": "application/json"})
+    if resp.status_code == 200:
+        data = resp.json()
+        blocks = data.get("data", {}).get("data", {}).get("blocks", {})
+        title_block = None
+        for bid, block in blocks.items():
+            if block.get("type") == 0:
+                title_block = block
+                break
+        if title_block:
+            text_parts = title_block.get("data", {}).get("title", [])
+            title = "".join(t.get("text", {}).get("content", "") for t in text_parts if t.get("type") == "text")
+        else:
+            title = "FlowUs Notes"
+        return {"title": title, "blocks": blocks}
+    print(f"  [WARN] Internal API fetch failed: {resp.status_code}")
+    return None
+
+
+def fetch_all_children_internal(page_id):
+    data = fetch_page_internal(page_id)
+    if not data:
+        return []
+    blocks = data.get("blocks", {})
+    children = []
+    for bid, block in blocks.items():
+        children.append(block)
+    children.sort(key=lambda b: b.get("order", 0))
+    return children
+
+
+def convert_internal_block(block, blocks_dict, depth=0):
+    block_type = block.get("type", 0)
+    block_data = block.get("data", {})
+    block_id = block.get("uuid", "")
+    indent = "  " * depth
+    md = ""
+
+    if block_type == 0:
+        text_parts = block_data.get("title", [])
+        text = "".join(t.get("text", {}).get("content", "") for t in text_parts if t.get("type") == "text")
+        icon = block_data.get("icon", "")
+        title_prefix = f"{icon} " if icon else ""
+        return f"# {title_prefix}{text}\n\n", False
+
+    elif block_type in (1, 2, 3):
+        text = flat_inline_text(block_data.get("title", []))
+        prefix = "#" * block_type
+        md += f"{prefix} {text}\n\n"
+
+    elif block_type == 4:
+        text = flat_inline_text(block_data.get("title", []))
+        md += f"- {text}\n"
+
+    elif block_type == 5:
+        text = flat_inline_text(block_data.get("title", []))
+        md += f"1. {text}\n"
+
+    elif block_type == 6:
+        text = flat_inline_text(block_data.get("title", []))
+        md += f"> {text}\n"
+
+    elif block_type == 7:
+        text = flat_inline_text(block_data.get("title", []))
+        md += f"```\n{text}\n```\n\n"
+
+    elif block_type == 8:
+        md += f"---\n\n"
+
+    elif block_type == 9:
+        text = flat_inline_text(block_data.get("title", []))
+        checked = block_data.get("checked", False)
+        cb = "[x]" if checked else "[ ]"
+        md += f"- {cb} {text}\n"
+
+    elif block_type == 10:
+        text = flat_inline_text(block_data.get("title", []))
+        md += f"<details>\n<summary>{text}</summary>\n\n"
+        if block_data.get("children"):
+            for cid in block_data.get("children", []):
+                child = blocks_dict.get(cid)
+                if child:
+                    child_md, _ = convert_internal_block(child, blocks_dict, depth + 1)
+                    md += child_md
+        md += f"</details>\n\n"
+        return md, True
+
+    elif block_type == 14:
+        url = f"https://flowus.cn/api/file/{block_data.get('ossName', '')}"
+        caption = flat_inline_text(block_data.get("caption", []))
+        alt = caption or "image"
+        md += f"![{alt}]({url})\n\n"
+
+    elif block_type == 16:
+        children_ids = block_data.get("children", [])
+        for cid in children_ids:
+            child = blocks_dict.get(cid)
+            if child:
+                ctype = child.get("type", 0)
+                if ctype == 17:
+                    cells = child.get("data", {}).get("cells", [])
+                    row = " | ".join(flat_inline_text(c) for c in cells)
+                    md += f"| {row} |\n"
+        md += "\n"
+
+    elif block_type == 18:
+        title = block_data.get("title", "")
+        md += f"## Database: {title}\n\n"
+
+    else:
+        text = flat_inline_text(block_data.get("title", []))
+        if text:
+            md += f"{text}\n\n"
+
+    return md, False
+
+
+def flat_inline_text(parts):
+    if isinstance(parts, str):
+        return parts
+    text_parts = []
+    for p in parts or []:
+        if isinstance(p, dict):
+            text_parts.append(p.get("text", {}).get("content", ""))
+        else:
+            text_parts.append(str(p))
+    return "".join(text_parts)
 
 
 def extract_rich_text(rich_text_list):
@@ -292,16 +439,21 @@ def process_block(block, depth=0):
     return md, False
 
 
-def process_full_page(page_id, page_title=None, top_level=False):
+def process_full_page(page_id, page_title=None, top_level=False, use_internal_api=False):
     if not page_title:
-        page_data = get_page(page_id)
-        if page_data:
-            props = page_data.get("properties", {})
-            title_prop = props.get("title", {})
-            title_list = title_prop.get("title", [])
-            page_title = extract_plain_text(title_list) or "Untitled"
-        else:
-            page_title = "Untitled"
+        if use_internal_api:
+            internal_data = fetch_page_internal(page_id)
+            if internal_data:
+                page_title = internal_data.get("title", "Untitled")
+        if not page_title:
+            page_data = get_page(page_id)
+            if page_data:
+                props = page_data.get("properties", {})
+                title_prop = props.get("title", {})
+                title_list = title_prop.get("title", [])
+                page_title = extract_plain_text(title_list) or "Untitled"
+            else:
+                page_title = "Untitled"
 
     safe_name = slugify(page_title)
     if top_level:
@@ -312,6 +464,27 @@ def process_full_page(page_id, page_title=None, top_level=False):
         file_path = os.path.join(sub_dir, f"{safe_name}.md")
 
     print(f"  -> Generating: {file_path}")
+
+    if use_internal_api:
+        internal_data = fetch_page_internal(page_id)
+        if internal_data:
+            blocks = internal_data.get("blocks", {})
+            full_md = f"# {page_title}\n\n"
+            sorted_blocks = sorted(blocks.values(), key=lambda b: b.get("order", 0))
+            for block in sorted_blocks:
+                btype = block.get("type", 0)
+                if btype == 0:
+                    continue
+                md_text, skip = convert_internal_block(block, blocks)
+                full_md += md_text
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(full_md)
+            print(f"  [OK] Saved: {file_path}")
+            return file_path
+        else:
+            print("  [ERROR] Internal API also failed.")
+            return None
 
     full_md = f"# {page_title}\n\n"
 
@@ -365,12 +538,24 @@ def main():
         title_prop = props.get("title", {})
         title_list = title_prop.get("title", [])
         page_title = extract_plain_text(title_list) or "FlowUs Notes"
+        print(f"Page title: {page_title}")
+        process_full_page(PAGE_ID, page_title, top_level=True)
+        print("Done! All notes synced.")
     else:
-        page_title = "FlowUs Notes"
-
-    print(f"Page title: {page_title}")
-    process_full_page(PAGE_ID, page_title, top_level=True)
-    print("Done! All notes synced.")
+        print("[INFO] 官方 API 鉴权失败，尝试使用内部 API（无需鉴权）获取公开页面...")
+        internal_data = fetch_page_internal(PAGE_ID)
+        if internal_data:
+            page_title = internal_data.get("title", "FlowUs Notes")
+            print(f"Page title: {page_title}")
+            process_full_page(PAGE_ID, page_title, top_level=True, use_internal_api=True)
+            print("Done! All notes synced (via internal API).")
+        else:
+            print("[ERROR] 内部 API 也失败了，无法获取页面内容。")
+            print("[HELP] 请检查：")
+            print("[HELP] 1. FLOWUS_API_KEY 是否正确（在 FlowUs 开发者后台创建应用获取）")
+            print("[HELP] 2. 该页面是否已授权给你的 Bot（在页面右上角「分享」中添加你的应用）")
+            print("[HELP] 3. PAGE_ID 是否为页面真实的 UUID（可在分享链接中获得）")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
