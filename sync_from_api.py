@@ -83,23 +83,40 @@ def fetch_all_children(block_id, use_internal_api=False):
 
 
 def fetch_page_internal(page_id):
-    url = f"https://flowus.cn/api/docs/{page_id}"
-    resp = requests.get(url, headers={"Content-Type": "application/json"})
-    if resp.status_code == 200:
-        data = resp.json()
-        blocks = data.get("data", {}).get("data", {}).get("blocks", {})
-        title_block = None
-        for bid, block in blocks.items():
-            if block.get("type") == 0:
-                title_block = block
-                break
-        if title_block:
-            text_parts = title_block.get("data", {}).get("title", [])
-            title = "".join(t.get("text", {}).get("content", "") for t in text_parts if t.get("type") == "text")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "FlowUs X",
+        "app_version_name": "1.51.0",
+    }
+    urls_to_try = [
+        f"https://flowus.cn/api/docs/{page_id}",
+        f"https://flowus.cn/api/share/{page_id}",
+    ]
+    for url in urls_to_try:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            raw = resp.json()
+            code = raw.get("code")
+            if code == 0:
+                content = raw.get("data", {})
+                blocks = content.get("blocks", {})
+                print(f"  [INFO] Internal API ({url}) returned {len(blocks)} blocks")
+                if not blocks:
+                    print(f"  [DEBUG] Raw response (first 500 chars): {str(raw)[:500]}")
+                title = extract_internal_title(blocks) or "FlowUs Notes"
+                return {"title": title, "blocks": blocks}
+            else:
+                print(f"  [WARN] Internal API ({url}) returned code={code}: {str(raw)[:200]}")
         else:
-            title = "FlowUs Notes"
-        return {"title": title, "blocks": blocks}
-    print(f"  [WARN] Internal API fetch failed: {resp.status_code}")
+            print(f"  [WARN] Internal API ({url}) failed: {resp.status_code}")
+    return None
+
+
+def extract_internal_title(blocks):
+    for bid, block in blocks.items():
+        if block.get("type") == 0:
+            text_parts = block.get("data", {}).get("title", [])
+            return "".join(t.get("text", {}).get("content", "") for t in text_parts if t.get("type") == "text")
     return None
 
 
