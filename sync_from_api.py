@@ -97,7 +97,7 @@ def fetch_page_internal(page_id):
         if resp.status_code == 200:
             raw = resp.json()
             code = raw.get("code")
-            if code == 0:
+            if code in (0, 200):
                 content = raw.get("data", {})
                 blocks = content.get("blocks", {})
                 print(f"  [INFO] Internal API ({url}) returned {len(blocks)} blocks")
@@ -115,8 +115,7 @@ def fetch_page_internal(page_id):
 def extract_internal_title(blocks):
     for bid, block in blocks.items():
         if block.get("type") == 0:
-            text_parts = block.get("data", {}).get("title", [])
-            return "".join(t.get("text", {}).get("content", "") for t in text_parts if t.get("type") == "text")
+            return block.get("title", "") or segments_to_md(block.get("data", {}).get("segments", []))
     return None
 
 
@@ -124,110 +123,178 @@ def fetch_all_children_internal(page_id):
     data = fetch_page_internal(page_id)
     if not data:
         return []
-    blocks = data.get("blocks", {})
-    children = []
-    for bid, block in blocks.items():
-        children.append(block)
-    children.sort(key=lambda b: b.get("order", 0))
-    return children
+    return data.get("blocks", {})
+
+
+def segments_to_md(segments):
+    parts = []
+    for seg in segments or []:
+        text = seg.get("text", "")
+        enhancer = seg.get("enhancer", {})
+        if enhancer.get("code"):
+            text = f"`{text}`"
+        if enhancer.get("bold"):
+            text = f"**{text}**"
+        if enhancer.get("italic"):
+            text = f"*{text}*"
+        if enhancer.get("lineThrough"):
+            text = f"~~{text}~~"
+        seg_type = seg.get("type", 0)
+        url = seg.get("url", "")
+        if seg_type == 3 and url:
+            text = f"[{text}]({url})"
+        parts.append(text)
+    return "".join(parts)
 
 
 def convert_internal_block(block, blocks_dict, depth=0):
-    block_type = block.get("type", 0)
-    block_data = block.get("data", {})
-    block_id = block.get("uuid", "")
+    btype = block.get("type", -1)
+    data = block.get("data", {})
+    sub_nodes = block.get("subNodes", [])
     indent = "  " * depth
     md = ""
 
-    if block_type == 0:
-        text_parts = block_data.get("title", [])
-        text = "".join(t.get("text", {}).get("content", "") for t in text_parts if t.get("type") == "text")
-        icon = block_data.get("icon", "")
-        title_prefix = f"{icon} " if icon else ""
-        return f"# {title_prefix}{text}\n\n", False
+    if btype == 0:
+        return "", False
 
-    elif block_type in (1, 2, 3):
-        text = flat_inline_text(block_data.get("title", []))
-        prefix = "#" * block_type
-        md += f"{prefix} {text}\n\n"
+    elif btype == 1:
+        level = data.get("level", 0)
+        text = segments_to_md(data.get("segments", []))
+        if level == 0:
+            if text.strip():
+                md += f"{text}\n\n"
+        else:
+            prefix = "#" * min(level + 1, 6)
+            md += f"{prefix} {text}\n\n"
 
-    elif block_type == 4:
-        text = flat_inline_text(block_data.get("title", []))
-        md += f"- {text}\n"
-
-    elif block_type == 5:
-        text = flat_inline_text(block_data.get("title", []))
-        md += f"1. {text}\n"
-
-    elif block_type == 6:
-        text = flat_inline_text(block_data.get("title", []))
-        md += f"> {text}\n"
-
-    elif block_type == 7:
-        text = flat_inline_text(block_data.get("title", []))
-        md += f"```\n{text}\n```\n\n"
-
-    elif block_type == 8:
-        md += f"---\n\n"
-
-    elif block_type == 9:
-        text = flat_inline_text(block_data.get("title", []))
-        checked = block_data.get("checked", False)
+    elif btype == 3:
+        text = segments_to_md(data.get("segments", []))
+        checked = data.get("checked", False)
         cb = "[x]" if checked else "[ ]"
-        md += f"- {cb} {text}\n"
+        if text.strip():
+            md += f"{indent}- {cb} {text}\n"
 
-    elif block_type == 10:
-        text = flat_inline_text(block_data.get("title", []))
-        md += f"<details>\n<summary>{text}</summary>\n\n"
-        if block_data.get("children"):
-            for cid in block_data.get("children", []):
-                child = blocks_dict.get(cid)
-                if child:
-                    child_md, _ = convert_internal_block(child, blocks_dict, depth + 1)
-                    md += child_md
-        md += f"</details>\n\n"
+    elif btype == 4:
+        text = segments_to_md(data.get("segments", []))
+        if text.strip():
+            md += f"{indent}- {text}\n"
+
+    elif btype == 5:
+        text = segments_to_md(data.get("segments", []))
+        if text.strip():
+            md += f"{indent}1. {text}\n"
+
+    elif btype == 6:
+        text = segments_to_md(data.get("segments", []))
+        md += f"{indent}<details>\n<summary>{text}</summary>\n\n"
+        for child_uuid in sub_nodes:
+            child = blocks_dict.get(child_uuid)
+            if child:
+                child_md, _ = convert_internal_block(child, blocks_dict, depth + 1)
+                md += child_md
+        md += f"{indent}</details>\n\n"
         return md, True
 
-    elif block_type == 14:
-        url = f"https://flowus.cn/api/file/{block_data.get('ossName', '')}"
-        caption = flat_inline_text(block_data.get("caption", []))
-        alt = caption or "image"
-        md += f"![{alt}]({url})\n\n"
+    elif btype == 7:
+        text = segments_to_md(data.get("segments", []))
+        if text.strip():
+            md += f"# {text}\n\n"
 
-    elif block_type == 16:
-        children_ids = block_data.get("children", [])
-        for cid in children_ids:
-            child = blocks_dict.get(cid)
-            if child:
-                ctype = child.get("type", 0)
-                if ctype == 17:
-                    cells = child.get("data", {}).get("cells", [])
-                    row = " | ".join(flat_inline_text(c) for c in cells)
-                    md += f"| {row} |\n"
+    elif btype == 9:
+        md += f"{indent}---\n\n"
+
+    elif btype == 12:
+        text = segments_to_md(data.get("segments", []))
+        if text.strip():
+            md += f"{indent}> {text}\n\n"
+
+    elif btype == 13:
+        text = segments_to_md(data.get("segments", []))
+        if text.strip():
+            md += f"{text}\n\n"
+
+    elif btype == 14:
+        display = data.get("display", "")
+        oss_name = data.get("ossName", "")
+        if display == "image" and oss_name:
+            url = f"https://flowus.cn/api/file/{oss_name}"
+            md += f"{indent}![Image]({url})\n\n"
+        elif oss_name:
+            url = f"https://flowus.cn/api/file/{oss_name}"
+            caption = block.get("title", "File")
+            md += f"{indent}[{caption}]({url})\n\n"
+
+    elif btype == 16:
+        ref = data.get("ref", {})
+        ref_uuid = ref.get("uuid", "")
+        title = block.get("title", "Linked Page")
+        md += f"{indent}[{title}](https://flowus.cn/page/{ref_uuid})\n\n"
+
+    elif btype == 18:
+        title = block.get("title", "Database")
+        md += f"{indent}## Database: {title}\n\n"
+
+    elif btype == 20:
+        link = data.get("link", "")
+        md += f"{indent}[Embedded Page]({link})\n\n"
+
+    elif btype == 21:
+        link = data.get("link", "")
+        text = segments_to_md(data.get("linkInfo", []))
+        display = text or link
+        md += f"{indent}[{display}]({link})\n\n"
+
+    elif btype == 23:
+        text = segments_to_md(data.get("segments", []))
+        md += f"{indent}$${text}$$\n\n"
+
+    elif btype == 25:
+        text = segments_to_md(data.get("segments", []))
+        lang = data.get("format", {}).get("language", "")
+        md += f"{indent}```{lang}\n{text}\n```\n\n"
+
+    elif btype == 27:
+        md += f"{indent}<!-- table -->\n"
+        for child_uuid in sub_nodes:
+            child = blocks_dict.get(child_uuid)
+            if child and child.get("type") == 28:
+                row_data = child.get("data", {})
+                coll_props = row_data.get("collectionProperties", {})
+                cells = []
+                for col_key in sorted(coll_props.keys()):
+                    decorations = coll_props[col_key]
+                    cell_text = segments_to_md(decorations)
+                    cells.append(cell_text)
+                md += f"{indent}| {' | '.join(cells)} |\n"
         md += "\n"
+        return md, True
 
-    elif block_type == 18:
-        title = block_data.get("title", "")
-        md += f"## Database: {title}\n\n"
+    elif btype == 38:
+        text = segments_to_md(data.get("segments", []))
+        md += f"{indent}<details>\n<summary>{text}</summary>\n\n"
+        for child_uuid in sub_nodes:
+            child = blocks_dict.get(child_uuid)
+            if child:
+                child_md, _ = convert_internal_block(child, blocks_dict, depth + 1)
+                md += child_md
+        md += f"{indent}</details>\n\n"
+        return md, True
+
+    elif btype == 36 or btype == 37:
+        md += f"{indent}<!-- mindmap -->\n"
+        for child_uuid in sub_nodes:
+            child = blocks_dict.get(child_uuid)
+            if child:
+                child_md, _ = convert_internal_block(child, blocks_dict, depth + 1)
+                md += child_md
+        return md, True
 
     else:
-        text = flat_inline_text(block_data.get("title", []))
+        text = block.get("title", "")
         if text:
             md += f"{text}\n\n"
 
     return md, False
-
-
-def flat_inline_text(parts):
-    if isinstance(parts, str):
-        return parts
-    text_parts = []
-    for p in parts or []:
-        if isinstance(p, dict):
-            text_parts.append(p.get("text", {}).get("content", ""))
-        else:
-            text_parts.append(str(p))
-    return "".join(text_parts)
 
 
 def extract_rich_text(rich_text_list):
@@ -487,13 +554,19 @@ def process_full_page(page_id, page_title=None, top_level=False, use_internal_ap
         if internal_data:
             blocks = internal_data.get("blocks", {})
             full_md = f"# {page_title}\n\n"
-            sorted_blocks = sorted(blocks.values(), key=lambda b: b.get("order", 0))
-            for block in sorted_blocks:
-                btype = block.get("type", 0)
-                if btype == 0:
-                    continue
-                md_text, skip = convert_internal_block(block, blocks)
-                full_md += md_text
+            root_block = blocks.get(page_id)
+            if not root_block:
+                for bid, b in blocks.items():
+                    if b.get("type") == 0:
+                        root_block = b
+                        break
+            if root_block:
+                sub_nodes = root_block.get("subNodes", [])
+                for child_uuid in sub_nodes:
+                    child = blocks.get(child_uuid)
+                    if child:
+                        md_text, _ = convert_internal_block(child, blocks)
+                        full_md += md_text
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(full_md)
