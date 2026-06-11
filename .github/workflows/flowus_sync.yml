@@ -1,0 +1,38 @@
+name: FlowUs 网络自动同步
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install requests
+
+    - name: Run Sync Script
+      env:
+        FLOWUS_API_KEY: ${{ secrets.FLOWUS_API_KEY }}
+        FLOWUS_PAGE_ID: ${{ secrets.FLOWUS_PAGE_ID }}
+      run: |
+        python sync_from_api.py
+
+    - name: Commit and Push Changes
+      run: |
+        git config --global user.name "FlowUs-Sync-Bot"
+        git config --global user.email "bot@github.com"
+        git add .
+        git commit -m "Automated Network Sync: $(date)" || exit 0
+        git push
