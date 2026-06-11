@@ -5,8 +5,8 @@ import requests
 import re
 
 
-API_KEY = os.environ.get("FLOWUS_API_KEY")
-PAGE_ID = os.environ.get("FLOWUS_PAGE_ID")
+API_KEY = os.environ.get("FLOWUS_API_KEY", "").strip()
+PAGE_ID = os.environ.get("FLOWUS_PAGE_ID", "").strip()
 BASE_URL = "https://api.flowus.cn"
 
 HEADERS = {
